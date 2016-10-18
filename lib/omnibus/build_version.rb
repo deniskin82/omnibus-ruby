@@ -1,6 +1,5 @@
 #
-# Copyright:: Copyright (c) 2012 Opscode, Inc.
-# License:: Apache License, Version 2.0
+# Copyright 2012-2014 Chef Software, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,23 +14,21 @@
 # limitations under the License.
 #
 
-require 'time'
-require 'omnibus/util'
+require "time"
 
 module Omnibus
-
   # Provides methods for generating Omnibus project build version
   # strings automatically from Git repository information.
   #
   # @see Omnibus::Project#build_version
   #
   # @note Requires a Git repository
-  # @todo Add class method shortcuts for semver and git_describe
-  #   versions e.g., Omnibus::BuildVersion.semver.
+  #
   # @todo Rename this class to reflect its absolute dependence on running in a
   #   Git repository.
   class BuildVersion
-    include Omnibus::Util
+    include Logging
+    include Util
 
     # Formatting string for the timestamp component of our SemVer build specifier.
     #
@@ -39,16 +36,27 @@ module Omnibus
     # @see Time#strftime
     TIMESTAMP_FORMAT = "%Y%m%d%H%M%S"
 
-    # @deprecated Use {#semver} or {#git_describe} instead
-    def self.full
-      puts "#{self.name}.full is deprecated. Use #{self.name}.new.semver or #{self.name}.new.git_describe."
-      Omnibus::BuildVersion.new.git_describe
+    class << self
+      # @see (BuildVersion#git_describe)
+      def git_describe
+        new.git_describe
+      end
+
+      # @see (BuildVersion#semver)
+      def semver
+        new.semver
+      end
+
+      def build_start_time
+        new.build_start_time
+      end
     end
 
     # Create a new BuildVersion
     #
-    # @param [String] path      Path from which to read git version information
-    def initialize(path=Omnibus.root)
+    # @param [String] path
+    #   Path from which to read git version information
+    def initialize(path = Config.project_root)
       @path = path
     end
 
@@ -65,12 +73,9 @@ module Omnibus
     #
     #     MAJOR.MINOR.PATCH-PRERELEASE+TIMESTAMP.git.COMMITS_SINCE.GIT_SHA
     #
-    # By default, a timestamp is incorporated into the build component
-    # of version string (see
-    # {Omnibus::BuildVersion::TIMESTAMP_FORMAT}).  This can be
-    # disabled by setting the environment variable
-    # `OMNIBUS_APPEND_TIMESTAMP` to a "falsey" value (e.g. "false",
-    # "f", "no", "n", "0")
+    # By default, a timestamp is incorporated into the build component of
+    # version string (see {Omnibus::BuildVersion::TIMESTAMP_FORMAT}). This
+    # option is configurable via the {Config}.
     #
     # @example 11.0.0-alpha.1+20121218164140.git.207.694b062
     # @return [String]
@@ -87,7 +92,7 @@ module Omnibus
       if prerelease_version?
         # ensure all dashes are dots per precedence rules (#12) in Semver
         # 2.0.0-rc.1
-        prerelease = prerelease_tag.gsub("-", ".")
+        prerelease = prerelease_tag.tr("-", ".")
         build_tag << "-" << prerelease
       end
 
@@ -100,7 +105,9 @@ module Omnibus
       # variable to a 'falsey' value (ie false, f, no, n or 0).
       #
       # format: YYYYMMDDHHMMSS example: 20130131123345
-      build_version_items << build_start_time.strftime(TIMESTAMP_FORMAT) if append_timestamp?
+      if Config.append_timestamp
+        build_version_items << build_start_time
+      end
 
       # We'll append the git describe information unless we are sitting right
       # on an annotated tag.
@@ -117,6 +124,26 @@ module Omnibus
       build_tag
     end
 
+    # We'll attempt to retrive the timestamp from the Jenkin's set BUILD_ID
+    # environment variable. This will ensure platform specfic packages for the
+    # same build will share the same timestamp.
+    def build_start_time
+      @build_start_time ||= begin
+                              if ENV["BUILD_ID"]
+                                begin
+                                  Time.strptime(ENV["BUILD_ID"], "%Y-%m-%d_%H-%M-%S")
+                                rescue ArgumentError
+                                  error_message =  "BUILD_ID environment variable "
+                                  error_message << "should be in YYYY-MM-DD_hh-mm-ss "
+                                  error_message << "format."
+                                  raise ArgumentError, error_message
+                                end
+                              else
+                                Time.now.utc
+                              end
+                            end.strftime(TIMESTAMP_FORMAT)
+    end
+
     # Generates a version string by running
     # {https://www.kernel.org/pub/software/scm/git/docs/git-describe.html
     # git describe} in the root of the Omnibus project.
@@ -130,19 +157,18 @@ module Omnibus
     # @return [String]
     def git_describe
       @git_describe ||= begin
-                          git_cmd = "git describe"
-                          cmd = shellout(git_cmd,
-                                         :live_stream => nil,
-                                         :cwd => @path)
-                          if cmd.exitstatus == 0
-                            cmd.stdout.chomp
-                          else
-                            msg =  "Could not extract version information from `git describe`. "
-                            msg << "Setting version to 0.0.0"
-                            puts msg
-                            "0.0.0"
-                          end
-                        end
+        cmd = shellout("git describe --tags", cwd: @path)
+
+        if cmd.exitstatus == 0
+          cmd.stdout.chomp
+        else
+          log.warn(log_key) do
+            "Could not extract version information from 'git describe'! " \
+            "Setting version to 0.0.0."
+          end
+          "0.0.0"
+        end
+      end
     end
 
     # @!endgroup
@@ -177,9 +203,9 @@ module Omnibus
     # @return [nil] if no pre-release tag was found
     def prerelease_tag
       prerelease_regex = if commits_since_tag > 0
-                           /^\d+\.\d+\.\d+(?:-|\.)([0-9A-Za-z.-]+)-\d+-g[0-9a-f]+$/
+                           /^v?\d+\.\d+\.\d+(?:-|\.)([0-9A-Za-z.-]+)-\d+-g[0-9a-f]+$/
                          else
-                           /^\d+\.\d+\.\d+(?:-|\.)([0-9A-Za-z.-]+)$/
+                           /^v?\d+\.\d+\.\d+(?:-|\.)([0-9A-Za-z.-]+)$/
                          end
       match = prerelease_regex.match(git_describe)
       match ? match[1] : nil
@@ -219,13 +245,6 @@ module Omnibus
       match ? match[1].to_i : 0
     end
 
-    # @todo This method is never called in Omnibus.  Is this even used
-    #   (e.g., in the DSL files)?
-    def development_version?
-      patch = version_composition.last
-      patch.to_i.odd?
-    end
-
     # Indicates whether the version represents a pre-release or not, as
     # signalled by the presence of a pre-release tag in the version
     # string.
@@ -233,30 +252,14 @@ module Omnibus
     # @return [Boolean]
     # @see #prerelease_tag
     def prerelease_version?
-      !!(prerelease_tag)
+      if prerelease_tag
+        true
+      else
+        false
+      end
     end
 
     private
-
-    # We'll attempt to retrive the timestamp from the Jenkin's set BUILD_ID
-    # environment variable. This will ensure platform specfic packages for the
-    # same build will share the same timestamp.
-    def build_start_time
-      @build_start_time ||= begin
-                              if !ENV['BUILD_ID'].nil?
-                                begin
-                                  Time.strptime(ENV['BUILD_ID'], "%Y-%m-%d_%H-%M-%S")
-                                rescue ArgumentError
-                                  error_message =  "BUILD_ID environment variable "
-                                  error_message << "should be in YYYY-MM-DD_hh-mm-ss "
-                                  error_message << "format."
-                                  raise ArgumentError, error_message
-                                end
-                              else
-                                Time.now.utc
-                              end
-                            end
-    end
 
     # Pulls out the major, minor, and patch components from the output
     # of {#git_describe}.
@@ -268,17 +271,12 @@ module Omnibus
     #
     # @todo Compute this once and store the result in an instance variable
     def version_composition
-      version_regexp = /^(\d+)\.(\d+)\.(\d+)/
-      version_regexp.match(git_describe)[1..3]
-    end
+      version_regexp = /^v?(\d+)\.(\d+)\.(\d+)/
 
-    def append_timestamp?
-      if ENV['OMNIBUS_APPEND_TIMESTAMP'] && (ENV['OMNIBUS_APPEND_TIMESTAMP'] =~ (/^(false|f|no|n|0)$/i))
-        false
-      elsif ENV['OMNIBUS_APPEND_TIMESTAMP'] && (ENV['OMNIBUS_APPEND_TIMESTAMP'] =~ (/^(true|t|yes|y|1)$/i))
-        true
+      if match = version_regexp.match(git_describe)
+        match[1..3]
       else
-        Omnibus::Config.append_timestamp
+        raise "Invalid semver tag `#{git_describe}'!"
       end
     end
   end

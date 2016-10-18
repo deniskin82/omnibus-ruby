@@ -1,5 +1,25 @@
-language: ruby
+sudo: false
 rvm:
-  - 1.9.2
-  - 1.9.3
-script: rake spec
+  - 2.1.9
+  - 2.2.5
+bundler_args: "--jobs 7 --without docs local"
+branches:
+  only:
+    - 2.0-stable
+    - 3.0-stable
+    - master
+before_install:
+  - gem update --system
+  - gem install bundler
+before_script:
+  - git config --global user.email "clouseau@chef.io"
+  - git config --global user.name "Pink Panther"
+script: bundle exec rake travis:ci
+notifications:
+  slack:
+    on_change: true
+    on_failure: true
+    on_success: false
+    on_pull_requests: false
+    rooms:
+      secure: udLCoBl71xJBsW3P+YqZbA5xfaB8l4IIF6SKEXpjIUYNYyP6m77uoY9PZ/M/5EN1ojPXDxsZ6SiPEJifVpkX5Hqd0eu1MwWyRXvOwiDf/nkg2Y3mqwUQRb3LDYWZxPn+xp5mHePe3mvTICR1zH49yx7fdZs8Qvzhh3Lno/w/qZ4=

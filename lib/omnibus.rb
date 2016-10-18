@@ -1,6 +1,5 @@
 #
-# Copyright:: Copyright (c) 2012 Opscode, Inc.
-# License:: Apache License, Version 2.0
+# Copyright 2012-2014 Chef Software, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,290 +14,363 @@
 # limitations under the License.
 #
 
-require 'ohai'
-o = Ohai::System.new
-o.require_plugin('os')
-o.require_plugin('platform')
-o.require_plugin('linux/cpu') if o.os == 'linux'
-o.require_plugin('kernel')
-OHAI = o
+require "omnibus/core_extensions"
 
-require 'omnibus/library'
-require 'omnibus/reports'
-require 'omnibus/config'
-require 'omnibus/exceptions'
-require 'omnibus/software'
-require 'omnibus/project'
-require 'omnibus/fetchers'
-require 'omnibus/health_check'
-require 'omnibus/build_version'
-require 'omnibus/overrides'
-require 'omnibus/version'
+require "cleanroom"
+require "pathname"
 
-require 'pathname'
+require "omnibus/digestable"
+require "omnibus/exceptions"
+require "omnibus/sugarable"
+require "omnibus/util"
+require "omnibus/fetcher"
+require "omnibus/version"
 
 module Omnibus
-
-  DEFAULT_CONFIG_FILENAME = 'omnibus.rb'.freeze
-
-  # Configure Omnibus.
   #
-  # After this has been called, the {Omnibus::Config} object is
-  # available as `Omnibus.config`.
-  #
-  # @return [void]
-  #
-  # @deprecated Use {#load_configuration} if you need to process a
-  #   config file, followed by {#process_configuration} to act upon it.
-  def self.configure
-    load_configuration
-    process_configuration
-  end
-
-  # Convenience method for access to the Omnibus::Config object.
-  # Provided for backward compatibility.
-  #
-  # @ return [Omnibus::Config]
-  #
-  # @deprecated Just refer to {Omnibus::Config} directly.
-  def self.config
-    Config
-  end
-
-  # Load in an Omnibus configuration file.  Values will be merged with
-  # and override the defaults defined in {Omnibus::Config}.
-  #
-  # @param file [String] path to a configuration file to load
-  #
-  # @return [void]
-  def self.load_configuration(file=nil)
-    if file
-      Config.from_file(file)
-    end
-  end
-
-  # Processes the configuration to construct the dependency tree of
-  # projects and software.
-  #
-  # @return [void]
-  def self.process_configuration
-    Config.validate
-    process_dsl_files
-    generate_extra_rake_tasks
-  end
-
-  # All {Omnibus::Project} instances that have been created.
-  #
-  # @return [Array<Omnibus::Project>]
-  def self.projects
-    @projects ||= []
-  end
-
-  # Names of all the {Omnibus::Project} instances that have been created.
-  #
-  # @return [Array<String>]
-  def self.project_names
-    projects.map{|p| p.name}
-  end
-
-  # Load the {Omnibus::Project} instance with the given name.
-  #
-  # @param name [String]
-  # @return {Omnibus::Project}
-  def self.project(name)
-    projects.find{ |p| p.name == name}
-  end
-
-  # The absolute path to the Omnibus project/repository directory.
+  # The path to the default configuration file.
   #
   # @return [String]
   #
-  # @deprecated Call {Omnibus::Config.project_root} instead.  We need
-  #   to be able to easily tweak this at runtime via the CLI tool.
-  def self.project_root
-    Config.project_root
+  DEFAULT_CONFIG = "omnibus.rb".freeze
+
+  autoload :Builder,          "omnibus/builder"
+  autoload :BuildVersion,     "omnibus/build_version"
+  autoload :BuildVersionDSL,  "omnibus/build_version_dsl"
+  autoload :Cleaner,          "omnibus/cleaner"
+  autoload :Compressor,       "omnibus/compressor"
+  autoload :Config,           "omnibus/config"
+  autoload :Error,            "omnibus/exceptions"
+  autoload :FileSyncer,       "omnibus/file_syncer"
+  autoload :Generator,        "omnibus/generator"
+  autoload :GitCache,         "omnibus/git_cache"
+  autoload :HealthCheck,      "omnibus/health_check"
+  autoload :Instrumentation,  "omnibus/instrumentation"
+  autoload :Library,          "omnibus/library"
+  autoload :Logger,           "omnibus/logger"
+  autoload :Logging,          "omnibus/logging"
+  autoload :Metadata,         "omnibus/metadata"
+  autoload :NullArgumentable, "omnibus/null_argumentable"
+  autoload :Ohai,             "omnibus/ohai"
+  autoload :Package,          "omnibus/package"
+  autoload :Packager,         "omnibus/packager"
+  autoload :Project,          "omnibus/project"
+  autoload :Publisher,        "omnibus/publisher"
+  autoload :Reports,          "omnibus/reports"
+  autoload :S3Cache,          "omnibus/s3_cache"
+  autoload :Software,         "omnibus/software"
+  autoload :Templating,       "omnibus/templating"
+  autoload :ThreadPool,       "omnibus/thread_pool"
+  autoload :Licensing,        "omnibus/licensing"
+
+  autoload :GitFetcher,  "omnibus/fetchers/git_fetcher"
+  autoload :NetFetcher,  "omnibus/fetchers/net_fetcher"
+  autoload :NullFetcher, "omnibus/fetchers/null_fetcher"
+  autoload :PathFetcher, "omnibus/fetchers/path_fetcher"
+
+  autoload :ArtifactoryPublisher, "omnibus/publishers/artifactory_publisher"
+  autoload :NullPublisher,        "omnibus/publishers/null_publisher"
+  autoload :S3Publisher,          "omnibus/publishers/s3_publisher"
+
+  autoload :Manifest,      "omnibus/manifest"
+  autoload :ManifestEntry, "omnibus/manifest_entry"
+  autoload :ManifestDiff,  "omnibus/manifest_diff"
+
+  autoload :ChangeLog, "omnibus/changelog"
+  autoload :GitRepository, "omnibus/git_repository"
+
+  autoload :SemanticVersion, "omnibus/semantic_version"
+
+  module Command
+    autoload :Base,    "omnibus/cli/base"
+    autoload :Cache,   "omnibus/cli/cache"
+    autoload :Publish, "omnibus/cli/publish"
+    autoload :ChangeLog, "omnibus/cli/changelog"
   end
 
-  # The source root is the path to the root directory of the `omnibus` gem.
-  #
-  # @return [Pathname]
-  def self.source_root
-    @source_root ||= Pathname.new(File.expand_path("../..", __FILE__))
-  end
-
-  # The source root is the path to the root directory of the `omnibus-software`
-  # gem.
-  #
-  # @return [Pathname]
-  def self.omnibus_software_root
-    @omnibus_software_root ||= begin
-      if spec = Gem::Specification.find_all_by_name('omnibus-software').first
-        Pathname.new(spec.gem_dir)
-      else
-        nil
-      end
-    end
-  end
-
-  # Return paths to all configured {Omnibus::Project} DSL files.
-  #
-  # @return [Array<String>]
-  def self.project_files
-    ruby_files(File.join(project_root, Config.project_dir))
-  end
-
-  # Return paths to all configured {Omnibus::Software} DSL files.
-  #
-  # @return [Array<String>]
-  def self.software_files
-    ruby_files(File.join(project_root, Config.software_dir))
-  end
-
-  # Backward compat alias
-  #
-  # @todo print a deprecation message
   class << self
-    alias :root :project_root
-  end
+    #
+    # Reset the current Omnibus configuration. This is primary an internal API
+    # used in testing, but it can also be useful when Omnibus is used as a
+    # library.
+    #
+    # Note - this persists the +Logger+ object by default.
+    #
+    # @param [true, false] include_logger
+    #   whether the logger object should be cleared as well
+    #
+    # @return [void]
+    #
+    def reset!(include_logger = false)
+      instance_variables.each do |instance_variable|
+        unless include_logger
+          next if instance_variable == :@logger
+        end
 
-  private
+        remove_instance_variable(instance_variable)
+      end
 
-  # Generates {Omnibus::Project}s for each project DSL file in
-  # `project_specs`.  All projects are then accessible at
-  # {Omnibus#projects}
-  #
-  # @return [void]
-  #
-  # @see Omnibus::Project
-  def self.expand_projects
-    project_files.each do |spec|
-      Omnibus.projects << Omnibus::Project.load(spec)
-    end
-  end
-
-  # Generate {Omnibus::Software} objects for all software DSL files in
-  # `software_specs`.
-  #
-  # @param overrides [Hash] a hash of version override information.
-  # @param software_files [Array<String>]
-  # @return [void]
-  #
-  # @see Omnibus::Overrides#overrides
-  def self.expand_software(overrides, software_map)
-    unless overrides.is_a? Hash
-      raise ArgumentError, "Overrides argument must be a hash!  You passed #{overrides.inspect}."
+      Config.reset!
+      # Clear caches on Project and Software
+      Project.reset!
+      Software.reset!
     end
 
-    Omnibus.projects.each do |project|
-      project.dependencies.each do |dependency|
-        recursively_load_dependency(dependency, project, overrides, software_map)
+    #
+    # The logger for this Omnibus instance.
+    #
+    # @example
+    #   Omnibus.logger.debug { 'This is a message!' }
+    #
+    # @return [Logger]
+    #
+    def logger
+      @logger ||= Logger.new
+    end
+
+    #
+    # @api private
+    #
+    # Programatically set the logger for Omnibus.
+    #
+    # @param [Logger] logger
+    #
+    def logger=(logger)
+      @logger = logger
+    end
+
+    #
+    # The UI class for Omnibus.
+    #
+    # @return [Thor::Shell]
+    #
+    def ui
+      @ui ||= Thor::Base.shell.new
+    end
+
+    #
+    # Load in an Omnibus configuration file.  Values will be merged with
+    # and override the defaults defined in {Config}.
+    #
+    # @param [String] file path to a configuration file to load
+    #
+    # @return [void]
+    #
+    def load_configuration(file)
+      Config.load(file)
+    end
+
+    #
+    # Locate an executable in the current $PATH.
+    #
+    # @return [String, nil]
+    #   the path to the executable, or +nil+ if not present
+    #
+    def which(executable)
+      if File.file?(executable) && File.executable?(executable)
+        executable
+      elsif ENV["PATH"]
+        path = ENV["PATH"].split(File::PATH_SEPARATOR).find do |path|
+          File.executable?(File.join(path, executable))
+        end
+
+        path && File.expand_path(executable, path)
       end
     end
-  end
 
-  # Processes all configured {Omnibus::Project} and
-  # {Omnibus::Software} DSL files.
-  #
-  # @return [void]
-  def self.process_dsl_files
-    # Do projects first
-    expand_projects
-
-    # Then do software
-    final_software_map = prefer_local_software(omnibus_software_files,
-                                           software_files)
-
-    overrides = Config.override_file ? Omnibus::Overrides.overrides : {}
-
-    expand_software(overrides, final_software_map)
-  end
-
-  # Creates some additional Rake tasks beyond those generated in the
-  # process of reading in the DSL files.
-  #
-  # @return [void]
-  #
-  # @todo Not so sure I like how this is being done, but at least it
-  #   isolates the Rake stuff.
-  def self.generate_extra_rake_tasks
-    require 'omnibus/clean_tasks'
-  end
-
-  # Return a list of all the Ruby files (i.e., those with an "rb"
-  # extension) in the given directory
-  #
-  # @param dir [String]
-  # @return [Array<String>]
-  def self.ruby_files(dir)
-    Dir.glob("#{dir}/*.rb")
-  end
-
-  # Retrieve the fully-qualified paths to every software definition
-  # file bundled in the {https://github.com/opscode/omnibus-software omnibus-software} gem.
-  #
-  # @return [Array<String>] the list of paths. Will be empty if the
-  #   `omnibus-software` gem is not in the gem path.
-  def self.omnibus_software_files
-    if omnibus_software_root
-      Dir.glob(File.join(omnibus_software_root, 'config', 'software', '*.rb'))
-    else
-      []
-    end
-  end
-
-  # Given a list of software definitions from `omnibus-software` itself, and a
-  # list of software files local to the current project, create a
-  # single list of software definitions.  If the software was defined
-  # in both sets, the locally-defined one ends up in the final list.
-  #
-  # The base name of the software file determines what software it
-  # defines.
-  #
-  # @param omnibus_files [Array<String>]
-  # @param local_files [Array<String>]
-  # @return [Array<String>]
-  def self.prefer_local_software(omnibus_files, local_files)
-    base = software_map(omnibus_files)
-    local = software_map(local_files)
-    base.merge(local)
-  end
-
-  # Given a list of file paths, create a map of the basename (without
-  # extension) to the complete path.
-  #
-  # @param files [Array<String>]
-  # @return [Hash<String, String>]
-  def self.software_map(files)
-    files.each_with_object({}) do |file, collection|
-      software_name = File.basename(file, ".*")
-      collection[software_name] = file
-    end
-  end
-
-  # Loads a project's dependency recursively, ensuring all transitive dependencies
-  # are also loaded.
-  #
-  # @param dependency_name [String]
-  # @param project [Omnibus::Project]
-  # @param overrides [Hash] a hash of version override information.
-  # @param software_map [Hash<String, String>]
-  #
-  # @return [void]
-  def self.recursively_load_dependency(dependency_name, project, overrides, software_map)
-    dep_file = software_map[dependency_name]
-
-    unless dep_file
-      raise MissingProjectDependency.new(dependency_name,
-                                         [File.join(project_root, Config.software_dir),
-                                          File.join(omnibus_software_root, 'config', 'software')])
+    #
+    # All {Project} instances that have been loaded.
+    #
+    # @return [Array<:Project>]
+    #
+    def projects
+      project_map.map do |name, _|
+        Project.load(name)
+      end
     end
 
-    dep_software = Omnibus::Software.load(dep_file, project, overrides)
-    project.library.component_added(dep_software)
+    #
+    # Load the {Project} instance with the given name.
+    #
+    # @param [String] name
+    #   the name of the project to get
+    #
+    # @return [Project]
+    #
+    def project(name)
+      Project.load(name)
+    end
 
-    # load any transitive deps for the component into the library also
-    dep_software.dependencies.each do |dep|
-      recursively_load_dependency(dep, project, overrides, software_map)
+    #
+    # The source root is the path to the root directory of the `omnibus` gem.
+    #
+    # @return [Pathname]
+    #
+    def source_root
+      @source_root ||= Pathname.new(File.expand_path("../..", __FILE__))
+    end
+
+    #
+    # The preferred filepath to a project with the given name on disk.
+    #
+    # @return [String, nil]
+    #
+    def project_path(name)
+      project_map[name.to_s]
+    end
+
+    #
+    # The preferred filepath to a software with the given name on disk.
+    #
+    # @return [String, nil]
+    #
+    def software_path(name)
+      software_map[name.to_s]
+    end
+
+    #
+    # The list of directories to search for the given +path+. These paths are
+    # returned **in order** of specificity.
+    #
+    # @param [String] path
+    #   the subpath to search for
+    #
+    # @return [Array<String>]
+    #
+    def possible_paths_for(path)
+      possible_paths[path] ||= [
+        paths_from_project_root,
+        paths_from_local_software_dirs,
+        paths_from_software_gems,
+      ].flatten.inject([]) do |array, directory|
+        destination = File.join(directory, path)
+
+        if File.directory?(destination)
+          array << destination
+        end
+
+        array
+      end
+    end
+
+    private
+
+    #
+    # The list of possible paths, cached as a hash for quick lookup.
+    #
+    # @see {Omnibus.possible_paths_for}
+    #
+    # @return [Hash]
+    #
+    def possible_paths
+      @possible_paths ||= {}
+    end
+
+    #
+    # Map the given file paths to the basename of their file, with the +.rb+
+    # extension removed.
+    #
+    # @example
+    #   { 'foo' => '/path/to/foo' }
+    #
+    # @return [Hash<String, String>]
+    #
+    def basename_map(paths)
+      paths.inject({}) do |hash, directory|
+        Dir.glob("#{directory}/*.rb").each do |path|
+          name = File.basename(path, ".rb")
+          hash[name] ||= path
+        end
+
+        hash
+      end
+    end
+
+    #
+    # A hash of all softwares (by name) and their respective path on disk. These
+    # files are **in order**, meaning the software path is the **first**
+    # occurrence of the software in the list. If the same software is
+    # encountered a second time, it will be skipped.
+    #
+    # @example
+    #   { 'preparation' => '/home/omnibus/project/config/software/preparation.rb' }
+    #
+    # @return [Hash<String, String>]
+    #
+    def software_map
+      @software_map ||= basename_map(possible_paths_for(Config.software_dir))
+    end
+
+    #
+    # A hash of all projects (by name) and their respective path on disk. These
+    # files are **in order**, meaning the project path is the **first**
+    # occurrence of the project in the list. If the same project is
+    # encountered a second time, it will be skipped.
+    #
+    # @example
+    #   { 'chefdk' => '/home/omnibus/project/config/projects/chefdk.rb' }
+    #
+    # @return [Hash<String, String>]
+    #
+    def project_map
+      @project_map ||= basename_map(possible_paths_for(Config.project_dir))
+    end
+
+    #
+    # The list of all software paths to software from the project root. This is
+    # always a single value, but an array is returned for consistency with the
+    # other +software_paths_*+ methods.
+    #
+    # @see (Config#project_root)
+    # @see (Config#software_dir)
+    #
+    # @return [Array<String>]
+    #
+    def paths_from_project_root
+      @paths_from_project_root ||=
+        [Config.project_root]
+    end
+
+    #
+    # The list of all software paths on disk to software files. If relative
+    # paths are given, they are expanded relative to {Config#project_root}.
+    #
+    # @see (Config#local_software_dirs)
+    #
+    # @return [Array<String>]
+    #
+    def paths_from_local_software_dirs
+      @paths_from_local_software_dirs ||=
+        Array(Config.local_software_dirs).inject([]) do |array, path|
+          fullpath = File.expand_path(path, Config.project_root)
+
+          if File.directory?(fullpath)
+            array << fullpath
+          end
+
+          array
+        end
+    end
+
+    #
+    # The list of software paths from within the list of gems. These gems paths
+    # are loaded from disk using +Gem::Specification+. The latest version of
+    # the gem on disk is loaded. For this reason, it is recommended that you
+    # add these gems to your bundle and be nice to your co-workers.
+    #
+    # @see (Config#software_gems)
+    #
+    # @return [Array<String>]
+    #
+    def paths_from_software_gems
+      @paths_from_software_gems ||=
+        Array(Config.software_gems).inject([]) do |array, name|
+          if (spec = Gem::Specification.find_all_by_name(name).first)
+            array << File.expand_path(spec.gem_dir)
+          end
+
+          array
+        end
     end
   end
 end

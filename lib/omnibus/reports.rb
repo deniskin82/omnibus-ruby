@@ -1,6 +1,5 @@
 #
-# Copyright:: Copyright (c) 2012 Opscode, Inc.
-# License:: Apache License, Version 2.0
+# Copyright 2012-2014 Chef Software, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,10 +15,8 @@
 #
 
 module Omnibus
-
   module Reports
     extend self
-
 
     PADDING = 3
 
@@ -28,7 +25,7 @@ module Omnibus
     # will be stored in the column, the width is 0 (i.e., nothing
     # should be printed, not even the column header)
     def column_width(items, column_name)
-      widest_item = items.max{|a,b| a.size <=> b.size}
+      widest_item = items.max { |a, b| a.size <=> b.size }
       if widest_item
         widest = (widest_item.size >= column_name.size) ? widest_item : column_name
         widest.size + PADDING
@@ -38,13 +35,12 @@ module Omnibus
     end
 
     def non_nil_values(hashes, selector_key)
-      hashes.map{|v| v[selector_key]}.compact
+      hashes.map { |v| v[selector_key] }.compact
     end
 
     def pretty_version_map(project)
       out = ""
       version_map = project.library.version_map
-
 
       # Pull out data to print out
       versions = non_nil_values(version_map.values, :version)
@@ -53,9 +49,7 @@ module Omnibus
       # We only want the versions that have truly been overridden;
       # because we want to output a column only if something was
       # overridden, but nothing if no packages were changed
-      overridden_versions = non_nil_values(version_map.values.select{|v| v[:overridden]},
-                                           :given_version)
-
+      overridden_versions = non_nil_values(version_map.values.select { |v| v[:overridden] }, :default_version)
 
       # Determine how wide the printed table columns need to be
       name_width = column_width(version_map.keys, "Component")
@@ -80,20 +74,17 @@ module Omnibus
         version = version_map[name][:version]
         version_guid = version_map[name][:version_guid]
 
-        given_version = version_map[name][:given_version]
+        default_version = version_map[name][:default_version]
         overridden = version_map[name][:overridden]
 
         out << "#{name}".ljust(name_width)
         out << version.to_s.ljust(version_width)
         out << version_guid.to_s.ljust(guid_width) if version_guid
         # Only print out column if something was overridden
-        out << given_version.ljust(override_width) if overridden
+        out << default_version.ljust(override_width) if overridden
         out << "\n"
       end
       out
     end
-
   end
-
-
 end

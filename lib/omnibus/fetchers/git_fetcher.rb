@@ -1,6 +1,5 @@
 #
-# Copyright:: Copyright (c) 2012 Opscode, Inc.
-# License:: Apache License, Version 2.0
+# Copyright 2012-2014 Chef Software, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,193 +15,294 @@
 #
 
 module Omnibus
-
-  # Fetcher implementation for projects in git.
   class GitFetcher < Fetcher
-
-    name :git
-
-    attr_reader :source
-    attr_reader :project_dir
-    attr_reader :version
-
-    def initialize(software)
-      @name         = software.name
-      @source       = software.source
-      @version      = software.version
-      @project_dir  = software.project_dir
-    end
-
-    def description
-      s=<<-E
-repo URI:       #{@source[:git]}
-local location: #{@project_dir}
-E
-    end
-
-    def version_guid
-      "git:#{current_revision}".chomp
-    rescue
-    end
-
-    def clean
-      if existing_git_clone?
-        log "cleaning existing build"
-        clean_cmd = "git clean -fdx"
-        shell = Mixlib::ShellOut.new(clean_cmd, :live_stream => STDOUT, :cwd => project_dir)
-        shell.run_command
-        shell.error!
-      end
-    rescue Exception => e
-      ErrorReporter.new(e, self).explain("Failed to clean git repository '#{@source[:git]}'")
-      raise
-    end
-
+    #
+    # A fetch is required if the git repository is not cloned or if the local
+    # revision does not match the desired revision.
+    #
+    # @return [true, false]
+    #
     def fetch_required?
-      !existing_git_clone? || !current_rev_matches_target_rev?
+      !(cloned? && contains_revision?(resolved_version))
     end
 
+    #
+    # The version identifier for this git location. This is computed using the
+    # current revision on disk.
+    #
+    # @return [String]
+    #
+    def version_guid
+      "git:#{current_revision}"
+    end
+
+    #
+    # Clean the project directory by resetting the current working tree to
+    # the required revision.
+    #
+    # @return [true, false]
+    #   true if the project directory was cleaned, false otherwise.
+    #   In our case, we always return true because we always call
+    #   git checkout/clean.
+    #
+    def clean
+      log.info(log_key) { "Cleaning existing clone" }
+      git_checkout
+      git("clean -fdx")
+      true
+    end
+
+    #
+    # Fetch (clone) or update (fetch) the remote git repository.
+    #
+    # @return [void]
+    #
     def fetch
-      retries ||= 0
-      if existing_git_clone?
-        fetch_updates unless current_rev_matches_target_rev?
+      log.info(log_key) { "Fetching from `#{source_url}'" }
+      create_required_directories
+
+      if cloned?
+        git_fetch
       else
-        clone
-        checkout
+        force_recreate_project_dir! unless dir_empty?(project_dir)
+        git_clone
       end
-    rescue Exception => e
-      if retries >= 3
-        ErrorReporter.new(e, self).explain("Failed to fetch git repository '#{@source[:git]}'")
-        raise
-      else
-        # Deal with github failing all the time :(
-        time_to_sleep = 5 * (2 ** retries)
-        retries += 1
-        log "git clone/fetch failed for #{@source} #{retries} time(s), retrying in #{time_to_sleep}s"
-        sleep(time_to_sleep)
-        retry
-      end
+    end
+
+    #
+    # The version for this item in the cache.
+    #
+    # This method is called *before* clean but *after* fetch. Do not ever
+    # use the contents of the project_dir here.
+    #
+    # We aren't including the source/repo path here as there could be
+    # multiple branches/tags that all point to the same commit. We're
+    # assuming that we won't realistically ever get two git commits
+    # that are unique but share sha1s.
+    #
+    # TODO: Does this work with submodules?
+    #
+    # @return [String]
+    #
+    def version_for_cache
+      "revision:#{resolved_version}"
     end
 
     private
 
-    def clone
-      puts "cloning the source from git"
-      clone_cmd = "git clone #{@source[:git]} #{project_dir}"
-      shell = Mixlib::ShellOut.new(clone_cmd, :live_stream => STDOUT)
-      shell.run_command
-      shell.error!
+    #
+    # The URL where the git source should be downloaded from.
+    #
+    # @return [String]
+    #
+    def source_url
+      source[:git]
     end
 
-    def checkout
-      sha_ref = target_revision
-
-      checkout_cmd = "git checkout #{sha_ref}"
-      shell = Mixlib::ShellOut.new(checkout_cmd, :live_stream => STDOUT, :cwd => project_dir)
-      shell.run_command
-      shell.error!
+    #
+    # Determine if submodules should be cloned.
+    #
+    # @return [true, false]
+    #
+    def clone_submodules?
+      source[:submodules] || false
     end
 
-    def fetch_updates
-      puts "fetching updates and resetting to revision #{target_revision}"
-      fetch_cmd = "git fetch origin && git fetch origin --tags && git reset --hard #{target_revision}"
-      shell = Mixlib::ShellOut.new(fetch_cmd, :live_stream => STDOUT, :cwd => project_dir)
-      shell.run_command
-      shell.error!
+    #
+    # Determine if a directory is empty
+    #
+    # @return [true, false]
+    #
+    def dir_empty?(dir)
+      Dir.entries(dir).reject { |d| [".", ".."].include?(d) }.empty?
     end
 
-    def existing_git_clone?
+    #
+    # Forcibly remove and recreate the project directory
+    #
+    def force_recreate_project_dir!
+      log.warn(log_key) { "Removing existing directory #{project_dir} before cloning" }
+      FileUtils.rm_rf(project_dir)
+      Dir.mkdir(project_dir)
+    end
+
+    #
+    # Determine if the clone exists.
+    #
+    # @return [true, false]
+    #
+    def cloned?
       File.exist?("#{project_dir}/.git")
     end
 
-    def current_rev_matches_target_rev?
-      current_revision && current_revision.strip.to_i(16) == target_revision.strip.to_i(16)
+    #
+    # Clone the +source_url+ into the +project_dir+.
+    #
+    # @return [void]
+    #
+    def git_clone
+      git("clone#{" --recursive" if clone_submodules?} #{source_url} .")
     end
 
+    #
+    # Checkout the +resolved_version+.
+    #
+    # @return [void]
+    #
+    def git_checkout
+      # We are hoping to perform a checkout with detached HEAD (that's the
+      # default when a sha1 is provided).  git older than 1.7.5 doesn't
+      # support the --detach flag.
+      git("checkout #{resolved_version} -f -q")
+      git("submodule update --recursive") if clone_submodules?
+    end
+
+    #
+    # Fetch the remote tags and refs, and reset to +resolved_version+.
+    #
+    # @return [void]
+    #
+    def git_fetch
+      fetch_cmd = "fetch #{source_url} #{described_version}"
+      fetch_cmd << " --recurse-submodules=on-demand" if clone_submodules?
+      git(fetch_cmd)
+    end
+
+    #
+    # The current revision for the cloned checkout.
+    #
+    # @return [String]
+    #
     def current_revision
-      @current_rev ||= begin
-                         rev_cmd = "git rev-parse HEAD"
-                         shell = Mixlib::ShellOut.new(rev_cmd, :live_stream => STDOUT, :cwd => project_dir)
-                         shell.run_command
-                         shell.error!
-                         output = shell.stdout
-
-                         sha_hash?(output) ? output : nil
-                       end
+      cmd = git("rev-parse HEAD")
+      cmd.stdout.strip
+    rescue CommandFailed
+      log.debug(log_key) { "unable to determine current revision" }
+      nil
     end
 
-    def target_revision
-      @target_rev ||= begin
-                        if sha_hash?(version)
-                          version
-                        else
-                          revision_from_remote_reference(version)
-                        end
-                      end
+    #
+    # Check if the current clone has the requested commit id.
+    #
+    # @return [true, false]
+    #
+    def contains_revision?(rev)
+      cmd = git("cat-file -t #{rev}")
+      cmd.stdout.strip == "commit"
+    rescue CommandFailed
+      log.debug(log_key) { "unable to determine presence of commit #{rev}" }
+      false
     end
 
-    def sha_hash?(rev)
-      rev =~ /^[0-9a-f]{40}$/
+    #
+    # Execute the given git command, inside the +project_dir+.
+    #
+    # autcrlf is a hack to help support windows and posix clients using the
+    # same repository but canonicalizing files as they are committed to the
+    # repo but converting line endings when they are actually checked out
+    # into a working tree. We do not want to change the on-disk representation
+    # of our sources regardless of the platform we are building on unless
+    # explicitly asked for. Hence, we disable autocrlf.
+    #
+    # @see Util#shellout!
+    #
+    # @return [Mixlib::ShellOut]
+    #   the shellout object
+    #
+    def git(command)
+      shellout!("git -c core.autocrlf=false #{command}", cwd: project_dir)
     end
 
-    # Return the SHA corresponding to ref. If ref is an annotated tag,
-    # return the SHA that was tagged not the SHA of the tag itself.
-    def revision_from_remote_reference(ref)
-      retries ||= 0
+    # Class methods
+
+    # Return the SHA1 corresponding to a ref as determined by the remote source.
+    #
+    # @return [String]
+    #
+    def self.resolve_version(ref, source)
+      if sha_hash?(ref)
+        # A git server negotiates in terms of refs during the info-refs phase
+        # of a fetch. During upload-pack, the client is not allowed to specify
+        # any sha1s in the "wants" unless the server has publicized them during
+        # info-refs. Hence, the server is allowed to drop requests to fetch
+        # particular sha1s, even if it is an otherwise reachable commit object.
+        # Only when the service is specifically configured with
+        # uploadpack.allowReachableSHA1InWant is there any guarantee that it
+        # considers "naked" wants.
+        log.warn(log_key) { "git fetch on a sha1 is not guaranteed to work" }
+        log.warn(log_key) { "Specify a ref name instead of #{ref} on #{source}" }
+        ref
+      else
+        revision_from_remote_reference(ref, source)
+      end
+    end
+
+    #
+    # Determine if the given revision is a SHA
+    #
+    # @return [true, false]
+    #
+    def self.sha_hash?(rev)
+      rev =~ /^[0-9a-f]{4,40}$/i
+    end
+
+    #
+    # Return the SHA corresponding to ref.
+    #
+    # If ref is an annotated tag, return the SHA that was tagged not the SHA of
+    # the tag itself.
+    #
+    # @return [String]
+    #
+    def self.revision_from_remote_reference(ref, source)
       # execute `git ls-remote` the trailing '*' does globbing. This
       # allows us to return the SHA of the tagged commit for annotated
       # tags. We take care to only return exact matches in
       # process_remote_list.
-      cmd = "git ls-remote origin #{ref}*"
-      shell = Mixlib::ShellOut.new(cmd, :live_stream => STDOUT, :cwd => project_dir)
-      shell.run_command
-      shell.error!
-      commit_ref = process_remote_list(shell.stdout, ref)
-      if !commit_ref
-        raise "Could not parse SHA reference"
+      remote_list = shellout!("git ls-remote \"#{source[:git]}\" \"#{ref}*\"").stdout
+      commit_ref = dereference_annotated_tag(remote_list, ref)
+
+      unless commit_ref
+        raise UnresolvableGitReference.new(ref)
       end
       commit_ref
-    rescue Exception => e
-      if retries >= 3
-        ErrorReporter.new(e, self).explain("Failed to fetch git repository '#{@source[:git]}'")
-        raise
-      else
-        # Deal with github failing all the time :(
-        time_to_sleep = 5 * (2 ** retries)
-        retries += 1
-        log "git ls-remote failed for #{@source} #{retries} time(s), retrying in #{time_to_sleep}s"
-        sleep(time_to_sleep)
-        retry
-      end
     end
 
-    def process_remote_list(stdout, ref)
-      # Dereference annotated tags.
-      #
-      # Output will look like this:
-      #
-      # a2ed66c01f42514bcab77fd628149eccb4ecee28        refs/tags/rel-0.11.0
-      # f915286abdbc1907878376cce9222ac0b08b12b8        refs/tags/rel-0.11.0^{}
-      #
-      # The SHA with ^{} is the commit pointed to by an annotated
-      # tag. If ref isn't an annotated tag, there will not be a line
-      # with trailing ^{}.
-      #
+    #
+    # Dereference annotated tags.
+    #
+    # The +remote_list+ parameter is assumed to look like this:
+    #
+    #   a2ed66c01f42514bcab77fd628149eccb4ecee28        refs/tags/rel-0.11.0
+    #   f915286abdbc1907878376cce9222ac0b08b12b8        refs/tags/rel-0.11.0^{}
+    #
+    # The SHA with ^{} is the commit pointed to by an annotated
+    # tag. If ref isn't an annotated tag, there will not be a line
+    # with trailing ^{}.
+    #
+    # @param [String] remote_list
+    #   output from `git ls-remote origin` command
+    # @param [String] ref
+    #   the target git ref
+    #
+    # @return [String]
+    #
+    def self.dereference_annotated_tag(remote_list, ref)
       # We'll return the SHA corresponding to the ^{} which is the
       # commit pointed to by an annotated tag. If no such commit
       # exists (not an annotated tag) then we return the SHA of the
       # ref.  If nothing matches, return "".
-      lines = stdout.split("\n")
+      lines = remote_list.split("\n")
       matches = lines.map { |line| line.split("\t") }
-      # first try for ^{} indicating the commit pointed to by an
-      # annotated tag
+      # First try for ^{} indicating the commit pointed to by an
+      # annotated tag.
       tagged_commit = matches.find { |m| m[1].end_with?("#{ref}^{}") }
       if tagged_commit
-        tagged_commit[0]
+        tagged_commit.first
       else
         found = matches.find { |m| m[1].end_with?("#{ref}") }
         if found
-          found[0]
+          found.first
         else
           nil
         end
